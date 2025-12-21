@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zip's for Leon!</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>Enjoy these zips I made for you!</h1>
+      <p class="subtitle">I hope they give you a challenge!</p>
+
+      <div class="list" id="zipList">
+        <span class="msg">Loading zips…</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function loadZips() {
+      const list = document.getElementById("zipList");
+      list.innerHTML = `<span class="msg">Loading zips…</span>`;
+
+      const res = await fetch("puzzles.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to load puzzles.json (${res.status})`);
+
+      const data = await res.json();
+      const zips = Array.isArray(data.zips) ? data.zips.slice() : [];
+      zips.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+
+      list.innerHTML = "";
+
+      if (zips.length === 0) {
+        list.innerHTML = `<span class="msg bad">No zips found in puzzles.json</span>`;
+        return;
+      }
+
+      for (const z of zips) {
+        const n = Array.isArray(z.grid) ? z.grid.length : 0;
+        const a = document.createElement("a");
+        a.className = "btn";
+        a.href = `zip.html?id=${encodeURIComponent(z.id)}`;
+        a.textContent = `Play Zip #${z.id}${n ? ` (${n}×${n})` : ""}`;
+        list.appendChild(a);
+      }
+    }
+
+    loadZips().catch(err => {
+      console.error(err);
+      const list = document.getElementById("zipList");
+      list.innerHTML = `<span class="msg bad">Could not load puzzles.json. Run a local server (http://localhost), not file://</span>`;
+    });
+  </script>
+</body>
+</html>
