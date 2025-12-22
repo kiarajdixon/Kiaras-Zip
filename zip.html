@@ -31,6 +31,7 @@
         <button class="btn btn-ghost" id="resetBtn" type="button">Reset</button>
         <button class="btn" id="checkBtn" type="button">Check</button>
         <button class="btn" id="solveBtn" type="button">Solve</button>
+        <div id="timer" style="margin-left:12px;font-weight:700">0.000s</div>
         <p class="msg" id="msg" role="status" aria-live="polite"></p>
       </div>
     </section>
@@ -60,6 +61,38 @@
     }
 
     (async function main() {
+      // --- per-user helpers (localStorage-backed, lightweight) ---
+      function getCurrentUser() {
+        return localStorage.getItem("zip_currentUser");
+      }
+
+      function getUserData(user) {
+        if (!user) return { opened: {}, completed: {}, startTimes: {}, times: {} };
+        const raw = localStorage.getItem(`zip_user_${user}`);
+        try { return raw ? JSON.parse(raw) : { opened: {}, completed: {}, startTimes: {}, times: {} }; } catch { return { opened: {}, completed: {}, startTimes: {}, times: {} }; }
+      }
+
+      function saveUserData(user, data) {
+        if (!user) return;
+        localStorage.setItem(`zip_user_${user}`, JSON.stringify(data));
+      }
+
+      function markOpenedForUser(user, id) {
+        if (!user) return;
+        const d = getUserData(user);
+        d.opened = d.opened || {};
+        d.opened[id] = true;
+        saveUserData(user, d);
+      }
+
+      function markCompletedForUser(user, id) {
+        if (!user) return;
+        const d = getUserData(user);
+        d.completed = d.completed || {};
+        d.completed[id] = true;
+        saveUserData(user, d);
+      }
+
       const id = getZipIdFromURL();
       const titleEl = document.getElementById("zipTitle");
       const msgEl = document.getElementById("msg");
@@ -93,6 +126,101 @@
       // ----------------------------
       // Zip logic
       // ----------------------------
+      // mark opened for current user and initialize visibility-only timer
+      const timerEl = document.getElementById('timer');
+      let _elapsedMs = 0;  // actual elapsed time (only while visible)
+      let _visibleStartMs = null;  // when tab became visible
+      let _timerRaf = null;
+
+      function fmtMs(ms) {
+        if (ms == null) return '—';
+        const s = Math.floor(ms/1000);
+        const rem = Math.floor(ms%1000);
+        return `${s}.${String(rem).padStart(3,'0')}s`;
+      }
+
+      function updateTimerNow() {
+        let total = _elapsedMs;
+        if (_visibleStartMs != null) {
+          total += Date.now() - _visibleStartMs;
+        }
+        timerEl.textContent = fmtMs(total);
+        _timerRaf = requestAnimationFrame(updateTimerNow);
+      }
+
+      function startTimerIfVisible() {
+        if (document.visibilityState === 'visible') {
+          if (_visibleStartMs == null) _visibleStartMs = Date.now();
+          if (_timerRaf) cancelAnimationFrame(_timerRaf);
+          updateTimerNow();
+        }
+      }
+
+      function stopTimerIfHidden() {
+        if (_visibleStartMs != null) {
+          _elapsedMs += Date.now() - _visibleStartMs;
+          _visibleStartMs = null;
+        }
+        if (_timerRaf) cancelAnimationFrame(_timerRaf);
+        _timerRaf = null;
+      }
+
+      function persistElapsedForUser(user) {
+        if (!user) return;
+        const d = getUserData(user);
+        d.startTimes = d.startTimes || {};
+        d.startTimes[ZIP_NUMBER] = _elapsedMs;
+        saveUserData(user, d);
+      }
+
+      try {
+        const user = getCurrentUser();
+        if (user) markOpenedForUser(user, ZIP_NUMBER);
+
+        // load any previous elapsed time for this puzzle
+        const d = getUserData(user);
+        const entry = d.startTimes && d.startTimes[ZIP_NUMBER];
+        if (entry != null) {
+          if (typeof entry === 'number') _elapsedMs = entry;
+          else if (entry.start) _elapsedMs = entry.paused || 0;
+        }
+
+        // If completed already, show time and lock
+        if (d.completed && d.completed[ZIP_NUMBER]) {
+          const ms = d.times && d.times[ZIP_NUMBER];
+          setMsg(`Previously completed — time: ${fmtMs(ms)}`, true);
+          timerEl.textContent = fmtMs(ms);
+          finishedLock = true;
+          document.getElementById('board').style.pointerEvents = 'none';
+          document.getElementById('undoBtn').disabled = true;
+          document.getElementById('resetBtn').disabled = true;
+          document.getElementById('checkBtn').disabled = true;
+          document.getElementById('solveBtn').disabled = true;
+        } else {
+          // Start timer only if page is visible now
+          startTimerIfVisible();
+        }
+      } catch (e) {
+        // anonymous or error: start timer if visible
+        startTimerIfVisible();
+      }
+
+      // Pause when tab becomes hidden, resume when visible
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          stopTimerIfHidden();
+          persistElapsedForUser(getCurrentUser());
+        } else {
+          startTimerIfVisible();
+        }
+      });
+
+      // Save progress when leaving the page
+      window.addEventListener('beforeunload', () => {
+        stopTimerIfHidden();
+        persistElapsedForUser(getCurrentUser());
+      });
+
       const grid = ZIP_GRID;
       const n = grid.length;
       const N = n * n;
@@ -263,6 +391,39 @@
           if (isSolvedNow()) {
             finishedLock = true; // NEW: lock once solved (prevents rewind/undo)
             setMsg("Solved.", true);
+            // Persist completion for current user (only when user actually solved it)
+            try {
+              const user = getCurrentUser();
+              if (user) {
+                const d = getUserData(user);
+                const elapsed = (_startMs != null) ? (Date.now() - _startMs - _accumPaused) : null;
+                if (elapsed != null) {
+                  d.times = d.times || {};
+                  d.times[ZIP_NUMBER] = elapsed;
+                  if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
+                  saveUserData(user, d);
+
+                  // also POST progress to server (best-effort)
+                  try {
+                    const numbersCount = grid.flat().filter(x => x !== 0).length;
+                    fetch('/api/progress', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
+                    }).catch(()=>{});
+                  } catch(e) {}
+                }
+                markCompletedForUser(user, ZIP_NUMBER);
+              }
+            } catch (e) { /* ignore */ }
+
+            // stop timer and freeze interactions
+            stopTimerIfHidden();
+            document.getElementById('board').style.pointerEvents = 'none';
+            undoBtn.disabled = true;
+            resetBtn.disabled = true;
+            checkBtn.disabled = true;
+            solveBtn.disabled = true;
           } else {
             setMsg("Not solved yet.", false);
           }
@@ -303,6 +464,35 @@
         if (isSolvedNow()) {
           finishedLock = true; // NEW: lock if solved via Check
           setMsg("Solved.", true);
+          try {
+            const user = getCurrentUser();
+            if (user) {
+              const d = getUserData(user);
+              const elapsed = (_startMs != null) ? (Date.now() - _startMs - _accumPaused) : null;
+              if (elapsed != null) {
+                d.times = d.times || {};
+                d.times[ZIP_NUMBER] = elapsed;
+                if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
+                saveUserData(user, d);
+                try {
+                  const numbersCount = grid.flat().filter(x => x !== 0).length;
+                  fetch('/api/progress', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
+                  }).catch(()=>{});
+                } catch(e) {}
+              }
+              markCompletedForUser(user, ZIP_NUMBER);
+            }
+          } catch (e) {}
+          stopTimer();
+          document.getElementById('board').style.pointerEvents = 'none';
+          undoBtn.disabled = true;
+          resetBtn.disabled = true;
+          checkBtn.disabled = true;
+          solveBtn.disabled = true;
+          stopTimerIfHidden();
           redraw();
           return;
         }

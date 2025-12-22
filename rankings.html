@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rankings</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <div class="topbar">
+        <a class="btn btn-ghost" href="index.html">← Back</a>
+        <div class="titleblock">
+          <h1 class="h1">Rankings</h1>
+          <p class="subtitle">Rank users by solved count or time.</p>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <label style="font-weight:700">Rank by:</label>
+        <select id="rankBy">
+          <option value="count">Number solved (desc)</option>
+          <option value="mean">Mean time (asc)</option>
+          <option value="median">Median time (asc)</option>
+        </select>
+      </div>
+
+      <div id="rankContainer" style="margin-top:12px">
+        <p class="msg">Loading rankings…</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function loadData() {
+      // try server endpoints first
+      let users = null;
+      let progress = null;
+      try {
+        const r1 = await fetch('/api/users', { headers: { 'x-admin-token': 'admin-token' } });
+        if (r1.ok) users = await r1.json();
+      } catch(e) {}
+      try {
+        const r2 = await fetch('/api/progress');
+        if (r2.ok) progress = await r2.json();
+      } catch(e) {}
+
+      // fallback: read users.json (public) and localStorage progress
+      if (!users) {
+        try {
+          const r = await fetch('users.json', { cache: 'no-store' });
+          if (r.ok) users = await r.json();
+        } catch(e) { users = {}; }
+      }
+
+      if (!progress) {
+        // build progress from localStorage for this browser only
+        progress = {};
+        for (const k of Object.keys(localStorage)) {
+          if (!k.startsWith('zip_user_')) continue;
+          try {
+            const name = k.slice('zip_user_'.length);
+            const d = JSON.parse(localStorage.getItem(k));
+            progress[name] = { times: {} };
+            if (d && d.times) {
+              for (const id of Object.keys(d.times)) progress[name].times[id] = { ms: d.times[id] };
+            }
+          } catch(e) {}
+        }
+      }
+
+      return { users: users || {}, progress: progress || {} };
+    }
+
+    function computeStats(progress) {
+      const out = {};
+      for (const [user, p] of Object.entries(progress)) {
+        const times = [];
+        for (const [id, entry] of Object.entries(p.times || {})) {
+          const ms = (entry && typeof entry.ms === 'number') ? entry.ms : (typeof entry === 'number' ? entry : null);
+          if (ms != null) times.push(ms);
+        }
+        times.sort((a,b)=>a-b);
+        const count = times.length;
+        const mean = count ? Math.round(times.reduce((a,b)=>a+b,0)/count) : null;
+        let median = null;
+        if (count) {
+          if (count%2===1) median = times[(count-1)/2];
+          else median = Math.round((times[count/2 -1] + times[count/2])/2);
+        }
+        out[user] = { count, mean, median };
+      }
+      return out;
+    }
+
+    function render(usersObj, stats, mode) {
+      const container = document.getElementById('rankContainer');
+      container.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = 'User Rankings';
+      container.appendChild(title);
+
+      const list = document.createElement('ol');
+      const entries = Object.keys(stats).map(u => ({ user: u, ...stats[u] }));
+      if (mode === 'count') entries.sort((a,b)=> (b.count - a.count) || (a.mean || 1e9) - (b.mean || 1e9));
+      else if (mode === 'mean') entries.sort((a,b)=> ( (a.mean||1e9) - (b.mean||1e9) ) || (b.count - a.count));
+      else if (mode === 'median') entries.sort((a,b)=> ( (a.median||1e9) - (b.median||1e9) ) || (b.count - a.count));
+
+      for (const e of entries) {
+        const li = document.createElement('li');
+        const uname = document.createElement('span');
+        uname.style.fontWeight = 700;
+        uname.textContent = e.user;
+        const meta = document.createElement('span');
+        meta.style.marginLeft = '8px';
+        meta.textContent = ` solved=${e.count} mean=${fmtMs(e.mean)} median=${fmtMs(e.median)}`;
+        li.appendChild(uname);
+        li.appendChild(meta);
+        list.appendChild(li);
+      }
+      container.appendChild(list);
+    }
+
+    function fmtMs(ms) {
+      if (ms == null) return '—';
+      const s = Math.floor(ms/1000);
+      const rem = Math.floor(ms%1000);
+      return `${s}.${String(rem).padStart(3,'0')}s`;
+    }
+
+    (async function(){
+      const { users, progress } = await loadData();
+      const stats = computeStats(progress);
+      const select = document.getElementById('rankBy');
+      render(users, stats, select.value);
+      select.addEventListener('change', ()=> render(users, stats, select.value));
+    })();
+  </script>
+</body>
+</html>

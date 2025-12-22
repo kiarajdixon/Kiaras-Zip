@@ -2,13 +2,20 @@
 // Appends NEW puzzles into puzzles.json (does NOT overwrite).
 // Prevents duplicates by:
 //   1) identical grid
-//   2) identical DFS solver path
+//   2) identical solver path
 //
-// Key fixes:
+// Key fixes already included:
 // - grid is stored as a real 2D array (valid for your site).
 // - solutionPath stored as a compact string "r,c;r,c;..." to keep file readable.
 // - heartbeat + give-up logic + ALWAYS saves progress.
 // - writeOut() is defined once (not inside a loop).
+//
+// New (Option B):
+// - DFS solver now includes pruning for:
+//   (1) Reachability to the next required number via BFS over *currently-walkable* cells
+//   (2) Connectivity (no disconnected islands) of currently-walkable unvisited cells
+//
+// This keeps correctness for small boards and makes large boards much less hopeless.
 
 const fs = require("fs");
 const path = require("path");
@@ -149,18 +156,16 @@ function writeOut(outPath, puzzles) {
 // - numbered checkpoints 1..K visited in order
 // - cannot step on a numbered cell unless it is the next required number
 // - end on K
+//
+// Upgrades (Option B):
+// - BFS reachability prune to next checkpoint
+// - "No disconnected islands" prune over currently-walkable unvisited cells
 // --------------------------
-function findCellWithValue(grid, val) {
-  const n = grid.length;
-  for (let r = 0; r < n; r++)
-    for (let c = 0; c < n; c++) if (grid[r][c] === val) return [r, c];
-  return null;
-}
-
 function solveZipDFS(grid) {
   const n = grid.length;
   const N = n * n;
 
+  // Collect required numbers; must be exactly 1..K (no gaps)
   const req = [];
   for (let r = 0; r < n; r++)
     for (let c = 0; c < n; c++) if (grid[r][c] !== 0) req.push(grid[r][c]);
@@ -170,7 +175,19 @@ function solveZipDFS(grid) {
   for (let i = 0; i < req.length; i++) if (req[i] !== i + 1) return null;
   const K = req.length;
 
-  const start = findCellWithValue(grid, 1);
+  // Map value -> position for O(1) lookup
+  const posOf = Array(K + 1).fill(null);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const v = grid[r][c];
+      if (v !== 0) {
+        if (v >= 1 && v <= K) posOf[v] = [r, c];
+        else return null; // safety: value outside 1..K (shouldn't happen in your generator)
+      }
+    }
+  }
+
+  const start = posOf[1];
   if (!start) return null;
 
   const visited = Array.from({ length: n }, () => Array(n).fill(false));
@@ -179,12 +196,109 @@ function solveZipDFS(grid) {
   visited[start[0]][start[1]] = true;
   path.push(start);
 
-  function degreeOfCell(r, c) {
+  // ------------ rule helpers ------------
+  function isForbiddenCell(r, c, needed) {
+    const v = grid[r][c];
+    // If it's numbered and not the next required number, it is forbidden *right now*
+    return v !== 0 && needed !== null && v !== needed;
+  }
+
+  function canStandOn(r, c, needed) {
+    if (visited[r][c]) return false;
+    return !isForbiddenCell(r, c, needed);
+  }
+
+  function degreeOfCell(r, c, needed) {
     let d = 0;
-    for (const [nr, nc] of neighbors4(n, r, c)) if (!visited[nr][nc]) d++;
+    for (const [nr, nc] of neighbors4(n, r, c)) {
+      if (canStandOn(nr, nc, needed)) d++;
+    }
     return d;
   }
 
+  // BFS reachability: can we reach the next required number using only currently-walkable cells?
+  function reachableToNeeded(curR, curC, needed) {
+    if (needed === null) return true;
+
+    const target = posOf[needed];
+    if (!target) return false;
+    const [tr, tc] = target;
+
+    if (visited[tr][tc]) return true;
+    if (isForbiddenCell(tr, tc, needed)) return false; // should never trigger, but safe
+
+    const seen = Array.from({ length: n }, () => Array(n).fill(false));
+    const q = new Array(n * n);
+    let head = 0;
+    let tail = 0;
+
+    q[tail++] = [curR, curC];
+    seen[curR][curC] = true;
+
+    while (head < tail) {
+      const [r, c] = q[head++];
+
+      for (const [nr, nc] of neighbors4(n, r, c)) {
+        if (seen[nr][nc]) continue;
+        if (visited[nr][nc]) continue;
+        if (isForbiddenCell(nr, nc, needed)) continue;
+
+        if (nr === tr && nc === tc) return true;
+
+        seen[nr][nc] = true;
+        q[tail++] = [nr, nc];
+      }
+    }
+
+    return false;
+  }
+
+  // Connectivity prune:
+  // Treat "future numbers" as walls for the current phase (matches your movement rule).
+  // If the currently-walkable unvisited cells are split into multiple components, it's impossible.
+  function walkableUnvisitedConnected(needed) {
+    let seed = null;
+    let walkableCount = 0;
+
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (visited[r][c]) continue;
+        if (isForbiddenCell(r, c, needed)) continue;
+        walkableCount++;
+        if (!seed) seed = [r, c];
+      }
+    }
+
+    if (walkableCount === 0) return true;
+
+    const seen = Array.from({ length: n }, () => Array(n).fill(false));
+    const q = new Array(n * n);
+    let head = 0;
+    let tail = 0;
+
+    q[tail++] = seed;
+    seen[seed[0]][seed[1]] = true;
+
+    let reached = 0;
+
+    while (head < tail) {
+      const [r, c] = q[head++];
+      reached++;
+
+      for (const [nr, nc] of neighbors4(n, r, c)) {
+        if (seen[nr][nc]) continue;
+        if (visited[nr][nc]) continue;
+        if (isForbiddenCell(nr, nc, needed)) continue;
+
+        seen[nr][nc] = true;
+        q[tail++] = [nr, nc];
+      }
+    }
+
+    return reached === walkableCount;
+  }
+
+  // ------------ DFS ------------
   function dfs(r, c, nextReq) {
     if (path.length === N) {
       if (nextReq !== K + 1) return false;
@@ -192,17 +306,22 @@ function solveZipDFS(grid) {
     }
 
     const needed = nextReq <= K ? nextReq : null;
-    let cand = [];
 
+    // Prune 1: next checkpoint must be reachable through currently-walkable cells
+    if (!reachableToNeeded(r, c, needed)) return false;
+
+    // Prune 2: cannot leave disconnected "islands" of currently-walkable unvisited cells
+    if (!walkableUnvisitedConnected(needed)) return false;
+
+    let cand = [];
     for (const [nr, nc] of neighbors4(n, r, c)) {
-      if (visited[nr][nc]) continue;
-      const v = grid[nr][nc];
-      if (v !== 0 && needed !== null && v !== needed) continue;
+      if (!canStandOn(nr, nc, needed)) continue;
       cand.push([nr, nc]);
     }
 
+    // Same heuristic, but now "degree" respects forbidden cells too
     cand.sort(
-      (a, b) => degreeOfCell(a[0], a[1]) - degreeOfCell(b[0], b[1])
+      (a, b) => degreeOfCell(a[0], a[1], needed) - degreeOfCell(b[0], b[1], needed)
     );
 
     for (const [nr, nc] of cand) {
@@ -290,6 +409,8 @@ function main() {
     let sol = null;
     if (Array.isArray(p.solutionPath)) sol = p.solutionPath;
     else if (typeof p.solutionPath === "string") sol = stringToSolutionPath(p.solutionPath);
+
+    // If solution missing/invalid, recompute (now with pruning)
     if (!sol) sol = solveZipDFS(grid);
 
     if (sol) seenSolutions.add(puzzleSolutionKey(n, sol));
@@ -351,7 +472,7 @@ function main() {
           puzzles.push({
             id: nextId++,
             grid: result.grid, // ✅ valid 2D array
-            solutionPath: solutionPathToString(result.solutionPath) // compact
+            solutionPath: solutionPathToString(result.solutionPath), // compact
           });
 
           got++;
@@ -386,3 +507,4 @@ function main() {
 }
 
 main();
+

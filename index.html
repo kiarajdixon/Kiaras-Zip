@@ -10,6 +10,14 @@
 <body>
   <main class="wrap">
     <section class="card">
+      <div id="auth" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <div id="authInfo" style="flex:1">Not signed in</div>
+        <input id="username" placeholder="username" />
+        <input id="password" type="password" placeholder="password" />
+        <button id="loginBtn" class="btn">Sign In / Register</button>
+        <button id="logoutBtn" class="btn btn-ghost" style="display:none">Logout</button>
+        <a href="rankings.html" class="btn" id="rankBtn">Rankings</a>
+      </div>
       <h1>Enjoy these zips I made for you!</h1>
       <p class="subtitle">I hope they give you a challenge!</p>
 
@@ -20,6 +28,131 @@
   </main>
 
   <script>
+    // --- simple localStorage-backed user system (prototype) ---
+    function getCurrentUser() {
+      return localStorage.getItem("zip_currentUser");
+    }
+
+    function setCurrentUser(u) {
+      if (u) localStorage.setItem("zip_currentUser", u);
+      else localStorage.removeItem("zip_currentUser");
+      updateAuthUI();
+    }
+
+    function getUserData(user) {
+      if (!user) return { opened: {}, completed: {}, startTimes: {}, times: {} };
+      const raw = localStorage.getItem(`zip_user_${user}`);
+      try { return raw ? JSON.parse(raw) : { opened: {}, completed: {}, startTimes: {}, times: {} }; } catch { return { opened: {}, completed: {}, startTimes: {}, times: {} }; }
+    }
+
+    function saveUserData(user, data) {
+      if (!user) return;
+      localStorage.setItem(`zip_user_${user}`, JSON.stringify(data));
+    }
+
+    function markOpenedForUser(user, id) {
+      if (!user) return;
+      const d = getUserData(user);
+      d.opened = d.opened || {};
+      d.opened[id] = true;
+      saveUserData(user, d);
+    }
+
+    function markCompletedForUser(user, id) {
+      if (!user) return;
+      const d = getUserData(user);
+      d.completed = d.completed || {};
+      d.completed[id] = true;
+      saveUserData(user, d);
+    }
+
+    function updateAuthUI() {
+      const info = document.getElementById("authInfo");
+      const user = getCurrentUser();
+      const logout = document.getElementById("logoutBtn");
+      if (user) {
+        info.textContent = `Signed in as ${user}`;
+        logout.style.display = "inline-flex";
+      } else {
+        info.textContent = "Not signed in";
+        logout.style.display = "none";
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      updateAuthUI();
+      document.getElementById("loginBtn").addEventListener("click", async () => {
+        const user = document.getElementById("username").value.trim();
+        const pass = document.getElementById("password").value;
+        if (!user) return alert("Enter a username");
+
+        // First, try the server API if available (/api/login). If it doesn't exist or fails,
+        // fall back to previous behavior (local users.json / localStorage).
+        try {
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user, password: pass })
+          });
+          if (res.ok) { setCurrentUser(user); loadZips(); return; }
+          if (res.status === 404) {
+            // user not found on server: offer to register (if server allows)
+            if (confirm('User not found on server. Create account on server?')) {
+              const r2 = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, password: pass })
+              });
+              if (r2.ok) { setCurrentUser(user); loadZips(); return; }
+              const j = await r2.json().catch(()=>({}));
+              return alert('Register failed: ' + (j.error || r2.status));
+            }
+            return;
+          }
+          if (res.status === 401) return alert('Wrong password');
+
+          // other failures fall back to previous behavior
+          throw new Error('login failed');
+        } catch (err) {
+          // fallback to previous behavior (users.json or local registration)
+          try {
+            const res2 = await fetch("users.json", { cache: "no-store" });
+            if (!res2.ok) { handleLocalLogin(user, pass); return; }
+            const users = await res2.json();
+            const hasEntries = users && Object.keys(users).length > 0;
+            if (hasEntries) {
+              if (!users[user]) return alert("User not found. Contact site admin to create an account.");
+              if (users[user] !== pass) return alert("Wrong password");
+              setCurrentUser(user); loadZips(); return;
+            }
+            handleLocalLogin(user, pass);
+          } catch (e) {
+            handleLocalLogin(user, pass);
+          }
+        }
+      });
+
+      function handleLocalLogin(user, pass) {
+        const key = `zip_users`;
+        const usersRaw = localStorage.getItem(key);
+        const users = usersRaw ? JSON.parse(usersRaw) : {};
+        if (users[user]) {
+          if (users[user] !== pass) return alert("Wrong password");
+        } else {
+          // register locally
+          users[user] = pass;
+          localStorage.setItem(key, JSON.stringify(users));
+        }
+          setCurrentUser(user);
+          loadZips();
+      }
+
+      document.getElementById("logoutBtn").addEventListener("click", () => {
+        setCurrentUser(null);
+        loadZips();
+      });
+    });
+
     async function loadZips() {
       const list = document.getElementById("zipList");
       list.innerHTML = `<span class="msg">Loading zips…</span>`;
@@ -38,12 +171,80 @@
         return;
       }
 
+      const currentUser = getCurrentUser();
+      const userData = getUserData(currentUser);
+
+      // render dashboard container
+      let dash = document.getElementById("dashboard");
+      if (!dash) {
+        dash = document.createElement("div");
+        dash.id = "dashboard";
+        dash.className = "dashboard";
+        const container = document.querySelector(".card");
+        container.insertBefore(dash, document.getElementById("zipList"));
+      }
+
+      function fmtMs(ms) {
+        if (ms == null) return "—";
+        const s = Math.floor(ms / 1000);
+        const rem = Math.floor(ms % 1000);
+        return `${s}.${String(rem).padStart(3, "0")}s`;
+      }
+
+      // prepare completed times with puzzle metadata
+      const completedEntries = [];
+      for (const zidStr of Object.keys(userData.times || {})) {
+        const zid = Number(zidStr);
+        const ms = userData.times[zidStr];
+        const meta = zips.find(z => Number(z.id) === zid);
+        const n = Array.isArray(meta?.grid) ? meta.grid.length : null;
+        const numbersCount = meta ? meta.grid.flat().filter(x => x !== 0).length : null;
+        if (ms != null && meta) completedEntries.push({ id: zid, ms, n, numbersCount });
+      }
+
+      // stats
+      const timesSorted = completedEntries.map(e => e.ms).sort((a,b)=>a-b);
+      const avg = timesSorted.length ? Math.round(timesSorted.reduce((a,b)=>a+b,0)/timesSorted.length) : null;
+      const median = timesSorted.length ? (timesSorted.length%2===1 ? timesSorted[(timesSorted.length-1)/2] : Math.round((timesSorted[timesSorted.length/2 -1]+timesSorted[timesSorted.length/2])/2)) : null;
+
+      dash.innerHTML = `
+        <div class="title">Your Dashboard</div>
+        <div class="row">
+          <div class="stat">Average: ${fmtMs(avg)}</div>
+          <div class="stat">Median: ${fmtMs(median)}</div>
+          <div class="stat">Completed: ${timesSorted.length}</div>
+        </div>
+        <div class="ranking">
+          <div style="margin-top:8px;font-weight:700">Ranking (fastest → slowest)</div>
+          <ol id="rankList">
+          </ol>
+        </div>
+      `;
+
+      const rankList = dash.querySelector('#rankList');
+      completedEntries.sort((a,b)=>a.ms-b.ms).forEach(e=>{
+        const li = document.createElement('li');
+        li.textContent = `#${e.id} — ${fmtMs(e.ms)} — ${e.n}×${e.n} — numbers: ${e.numbersCount}`;
+        rankList.appendChild(li);
+      });
+
       for (const z of zips) {
         const n = Array.isArray(z.grid) ? z.grid.length : 0;
         const a = document.createElement("a");
         a.className = "btn";
         a.href = `zip.html?id=${encodeURIComponent(z.id)}`;
+        a.dataset.id = String(z.id);
         a.textContent = `Play Zip #${z.id}${n ? ` (${n}×${n})` : ""}`;
+
+        if (userData.opened && userData.opened[z.id]) a.classList.add("seen");
+        if (userData.completed && userData.completed[z.id]) a.classList.add("completed");
+
+        // clicking should mark as opened (timer starts when puzzle page is visible)
+        a.addEventListener("click", () => {
+          const user = getCurrentUser();
+          if (user) markOpenedForUser(user, z.id);
+        });
+
         list.appendChild(a);
       }
     }

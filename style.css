@@ -173,3 +173,30 @@ body {
   stroke: #f04b2d;
   opacity: 0.95;
 }
+
+/* Per-user states on index page */
+.btn.seen {
+  color: #777;
+  border-color: rgba(0,0,0,0.12);
+}
+
+.btn.completed {
+  background: #d6f5d6; /* pale green */
+  border-color: #7ac37a;
+  color: #083308;
+}
+
+/* Dashboard */
+.dashboard {
+  margin: 12px 0 8px 0;
+  padding: 10px;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 10px;
+  background: #fbfbfb;
+  font-size: 14px;
+}
+.dashboard .title { font-weight:700; margin-bottom:6px }
+.dashboard .row { display:flex; gap:12px; flex-wrap:wrap; }
+.dashboard .stat { padding:6px 8px; background:white; border-radius:8px; border:1px solid rgba(0,0,0,0.04) }
+.ranking { margin-top:8px }
+.ranking li { margin:4px 0; }
