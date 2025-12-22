@@ -31,7 +31,7 @@
         <button class="btn btn-ghost" id="resetBtn" type="button">Reset</button>
         <button class="btn" id="checkBtn" type="button">Check</button>
         <button class="btn" id="solveBtn" type="button">Solve</button>
-        <div id="timer" style="margin-left:12px;font-weight:700">0.000s</div>
+        <div id="timer" style="margin-left:12px;font-weight:700;font-size:18px">0s</div>
         <p class="msg" id="msg" role="status" aria-live="polite"></p>
       </div>
     </section>
@@ -134,9 +134,8 @@
 
       function fmtMs(ms) {
         if (ms == null) return '—';
-        const s = Math.floor(ms/1000);
-        const rem = Math.floor(ms%1000);
-        return `${s}.${String(rem).padStart(3,'0')}s`;
+        const s = Math.floor(ms / 1000);
+        return `${s}s`;
       }
 
       function updateTimerNow() {
@@ -395,24 +394,28 @@
             try {
               const user = getCurrentUser();
               if (user) {
-                const d = getUserData(user);
-                const elapsed = (_startMs != null) ? (Date.now() - _startMs - _accumPaused) : null;
-                if (elapsed != null) {
-                  d.times = d.times || {};
-                  d.times[ZIP_NUMBER] = elapsed;
-                  if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
-                  saveUserData(user, d);
-
-                  // also POST progress to server (best-effort)
-                  try {
-                    const numbersCount = grid.flat().filter(x => x !== 0).length;
-                    fetch('/api/progress', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
-                    }).catch(()=>{});
-                  } catch(e) {}
+                // Calculate total elapsed time
+                let elapsed = _elapsedMs;
+                if (_visibleStartMs != null) {
+                  elapsed += Date.now() - _visibleStartMs;
                 }
+                
+                const d = getUserData(user);
+                d.times = d.times || {};
+                d.times[ZIP_NUMBER] = elapsed;
+                if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
+                saveUserData(user, d);
+
+                // also POST progress to server (best-effort)
+                try {
+                  const numbersCount = grid.flat().filter(x => x !== 0).length;
+                  fetch('/api/progress', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
+                  }).catch(()=>{});
+                } catch(e) {}
+                
                 markCompletedForUser(user, ZIP_NUMBER);
               }
             } catch (e) { /* ignore */ }
@@ -467,32 +470,36 @@
           try {
             const user = getCurrentUser();
             if (user) {
-              const d = getUserData(user);
-              const elapsed = (_startMs != null) ? (Date.now() - _startMs - _accumPaused) : null;
-              if (elapsed != null) {
-                d.times = d.times || {};
-                d.times[ZIP_NUMBER] = elapsed;
-                if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
-                saveUserData(user, d);
-                try {
-                  const numbersCount = grid.flat().filter(x => x !== 0).length;
-                  fetch('/api/progress', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
-                  }).catch(()=>{});
-                } catch(e) {}
+              // Calculate total elapsed time
+              let elapsed = _elapsedMs;
+              if (_visibleStartMs != null) {
+                elapsed += Date.now() - _visibleStartMs;
               }
+              
+              const d = getUserData(user);
+              d.times = d.times || {};
+              d.times[ZIP_NUMBER] = elapsed;
+              if (d.startTimes) delete d.startTimes[ZIP_NUMBER];
+              saveUserData(user, d);
+              
+              try {
+                const numbersCount = grid.flat().filter(x => x !== 0).length;
+                fetch('/api/progress', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ username: user, id: ZIP_NUMBER, elapsed: elapsed, n: n, numbersCount })
+                }).catch(()=>{});
+              } catch(e) {}
+              
               markCompletedForUser(user, ZIP_NUMBER);
             }
           } catch (e) {}
-          stopTimer();
+          stopTimerIfHidden();
           document.getElementById('board').style.pointerEvents = 'none';
           undoBtn.disabled = true;
           resetBtn.disabled = true;
           checkBtn.disabled = true;
           solveBtn.disabled = true;
-          stopTimerIfHidden();
           redraw();
           return;
         }
